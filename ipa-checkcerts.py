@@ -17,6 +17,7 @@ from six import string_types
 from ipalib import api
 from ipalib import errors
 from ipalib import x509
+from ipalib.install import certstore
 from ipalib.install.kinit import kinit_keytab
 from ipalib.install import certmonger
 from ipaplatform.paths import paths
@@ -104,6 +105,27 @@ def validate_openssl(file):
                              % (file, e))
 
 
+def is_ipa_issued_cert(api, cert):
+    """
+    Compatibility function since 4.5 and 4.6 can only check certs
+    in an NSS database.
+
+    Return True if the certificate has been issued by IPA
+
+    Note that this method can only be executed if the api has been
+    initialized.
+
+    :param api: The pre-initialized IPA API
+    :param cert: The IPACertificate certificiate to test
+    """
+    cacert_subject = certstore.get_ca_subject(
+        api.Backend.ldap2,
+        api.env.container_ca,
+        api.env.basedn)
+
+    return DN(cert.issuer) == cacert_subject
+
+
 class certcheck(object):
     """
     Checks out certificate stuff
@@ -111,14 +133,17 @@ class certcheck(object):
 
     def __init__(self):
         self.failures = []
+        self.warnings = []
         self.service = None
         self.serverid = None
         self.ca = None
+        self.ds = None
+        self.http = None
         self.conn = None
 
     def run(self):
         """Execute the tests"""
-        api.bootstrap(in_server=False,
+        api.bootstrap(in_server=True,
                       context='cert_check',
                       confdir=paths.ETC_IPA)
         try:
@@ -127,17 +152,16 @@ class certcheck(object):
             logger.error("admin level Kerberos credentials are required")
             return 1
 
+        api.Backend.ldap2.connect()
+
         self.serverid = installutils.realm_to_serverid(api.env.realm)
 
         self.ca = cainstance.CAInstance(api.env.realm,
                                         host_name=api.env.host)
+        self.http = httpinstance.HTTPInstance()
+        self.ds = dsinstance.DsInstance()
 
-        self.conn = ldap2.ldap2(api)
-        try:
-            self.conn.connect(autobind=True)
-        except errors.NetworkError as e:
-            self.conn = None
-            self.failures.append('Cannot contact LDAP server: %s' % e)
+        self.conn = api.Backend.ldap2
 
         logger.info("Check CA status")
         self.check_ca_status()
@@ -188,6 +212,11 @@ class certcheck(object):
                 logger.info(f)
         else:
             logger.info("All checks passed")
+
+        if self.warnings:
+            logger.info("Warnings:")
+            for f in self.warnings:
+                logger.info(f)
 
         return self.failures != []
 
@@ -276,6 +305,57 @@ class certcheck(object):
         if self.ca.is_configured():
             requests += ca_requests
 
+        # Check the http server cert if issued by IPA
+        if version.NUM_VERSION >= 40700:
+            cert = x509.load_certificate_from_file(paths.HTTPD_CERT_FILE)
+            if is_ipa_issued_cert(api, cert):
+                requests.append(
+                    {
+                        'cert-file': paths.HTTPD_CERT_FILE,
+                        'key-file': paths.HTTPD_KEY_FILE,
+                        'ca-name': 'IPA',
+                        'cert-postsave-command': template % 'restart_httpd',
+                    }
+                )
+        else:
+            http_nickname = self.http.get_mod_nss_nickname()
+            http_db = certs.CertDB(api.env.realm, nssdir=paths.HTTPD_ALIAS_DIR)
+            if http_db.is_ipa_issued_cert(api, http_nickname):
+                requests.append(
+                    {
+                        'cert-database': paths.HTTPD_ALIAS_DIR,
+                        'cert-nickname': http_nickname,
+                        'ca-name': 'IPA',
+                        'cert-postsave-command': template % 'restart_httpd',
+                        }
+                    )
+
+        # Check the ldap server cert if issued by IPA
+        ds_nickname = self.ds.get_server_cert_nickname(self.serverid)
+        ds_db_dirname = dsinstance.config_dirname(self.serverid)
+        ds_db = certs.CertDB(api.env.realm, nssdir=ds_db_dirname)
+        if ds_db.is_ipa_issued_cert(api, ds_nickname):
+            requests.append(
+                {
+                    'cert-database': ds_db_dirname[:-1],
+                    'cert-nickname': ds_nickname,
+                    'ca-name': 'IPA',
+                    'cert-postsave-command':
+                        '%s %s' % (template % 'restart_dirsrv', self.serverid),
+                }
+            )
+
+        # Check the KDC cert if issued by IPA
+        cert = x509.load_certificate_from_file(paths.KDC_CERT)
+        if is_ipa_issued_cert(api, cert):
+            requests.append(
+                {
+                    'cert-file': paths.KDC_CERT,
+                    'key-file': paths.KDC_KEY,
+                    'ca-name': 'IPA',
+                }
+            )
+
         return requests
 
     def check_ca_status(self):
@@ -289,14 +369,32 @@ class certcheck(object):
     def check_tracking(self):
         """Compare expected vs actual tracking configuration"""
         requests = self.get_requests()
+        cm = certmonger._certmonger()
+
+        ids = []
+        all_requests = cm.obj_if.get_requests()
+        for req in all_requests:
+            request = certmonger._cm_dbus_object(cm.bus, cm, req,
+                                                 certmonger.DBUS_CM_REQUEST_IF,
+                                                 certmonger.DBUS_CM_IF, True)
+            id = request.prop_if.Get(certmonger.DBUS_CM_REQUEST_IF,
+                                     'nickname')
+            ids.append(str(id))
 
         for request in requests:
             request_id = certmonger.get_request_id(request)
+            try:
+                if request_id is not None:
+                    ids.remove(request_id)
+            except ValueError as e:
+                self.failures.append('Failure trying to remove % from '
+                                     'list: %s' % (request_id, e))
 
             if request_id is None:
                 self.failures.append('Missing tracking for %s' % request)
 
-        # TODO: look for unknown certs being tracked (or an option to do so)
+        if ids:
+            self.warnings.append('Unknown certmonger ids: %s' % ','.join(ids))
 
     def check_trust(self):
         """Check the NSS trust flags"""
@@ -338,7 +436,7 @@ class certcheck(object):
             request_id = certmonger.get_request_id(request)
 
             if request_id is None:
-                self.failures.append('Missing tracking for %s' % request)
+                # The missing tracking is reported in check_tracking()
                 continue
             nickname = request.get('cert-nickname')
             rawcert = certmonger.get_request_value(request_id, 'cert')
@@ -581,9 +679,6 @@ class certcheck(object):
 
     def validate_certs(self):
         """Use certutil -V to validate the certs we can"""
-        http = httpinstance.HTTPInstance()
-        ds = dsinstance.DsInstance()
-
         ca_pw_name = None
 
         if self.ca.is_configured():
@@ -608,7 +703,7 @@ class certcheck(object):
             validate = [
                 (
                     dsinstance.config_dirname(self.serverid),
-                    ds.get_server_cert_nickname(self.serverid),
+                    self.ds.get_server_cert_nickname(self.serverid),
                     os.path.join(dsinstance.config_dirname(self.serverid),
                                  'pwdfile.txt'),
 
@@ -628,7 +723,7 @@ class certcheck(object):
                 validate.append(
                     (
                         paths.HTTPD_ALIAS_DIR,
-                        http.get_mod_nss_nickname(),
+                        self.http.get_mod_nss_nickname(),
                         os.path.join(paths.HTTPD_ALIAS_DIR, 'pwdfile.txt'),
                     ),
                 )
@@ -702,12 +797,9 @@ class certcheck(object):
         serialno = 1  # TODO don't hardcode it
 
         try:
-            api.Backend.rpcclient.connect()
             api.Command.cert_show(serialno)
         except Exception as e:
             self.failures.append('cert-show of %s failed: %s' % (serialno, e))
-        finally:
-            api.Backend.rpcclient.disconnect()
 
     def check_permissions(self):
 
