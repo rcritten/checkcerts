@@ -4,6 +4,7 @@
 
 from __future__ import absolute_import
 
+import base64
 import datetime
 import grp
 import gssapi
@@ -37,6 +38,14 @@ try:
     from ipapython.directivesetter import get_directive
 except ImportError:
     from ipaserver.install.installutils import get_directive
+from pyasn1_modules.rfc2459 import Name
+from pyasn1.codec.der.decoder import decode
+from cryptography.x509.oid import ObjectIdentifier
+
+try:
+    from ipapython.dn import ATTR_NAME_BY_OID
+except ImportError:
+    from ipapython.dn import _ATTR_NAME_BY_OID as ATTR_NAME_BY_OID
 
 if version.NUM_VERSION < 40700:
     KEYDB = 'key3.db'
@@ -64,6 +73,22 @@ def load_der_certificate(cert):
         return x509.load_certificate(cert, x509.DER)
     else:
         return x509.load_der_x509_certificate(cert)
+
+def der_to_subject(der):
+    """Convert Name() ASN.1 into a DN type"""
+    name, _ = decode(der, asn1Spec=Name())
+
+    subject = DN()
+
+    for item in name.getComponentByPosition(0):
+        data = item.getComponentByPosition(0)
+
+        rdn = data.getComponentByPosition(0).prettyPrint()
+        value = data.getComponentByPosition(1).asOctets()[2:].decode('utf-8')
+
+        subject += (DN((ATTR_NAME_BY_OID[ObjectIdentifier(rdn)], value)))
+
+    return subject
 
 class certcheck(object):
     """
@@ -108,6 +133,9 @@ class certcheck(object):
 
         logger.info("Checking certificates in CS.cfg")
         self.check_cs_cfg()
+
+        logger.info("Comparing certificates to requests in LDAP")
+        self.compare_requests()
 
         logger.info("Checking RA certificate")
         self.check_ra_cert()
@@ -334,6 +362,55 @@ class certcheck(object):
             if pem.strip() != val:
                 self.failures.append('Certificate %s does not match %s'
                     % (blobs[nickname], paths.CA_CS_CFG_PATH))
+
+    def compare_requests(self):
+        """
+        Compare cert serial numbers to their request
+
+        The CA subsystem certificates are renewed using the certmonger
+        CA dogtag-ipa-ca-renew-agent. This renews by serial number,
+        sending CS a request like:
+            GET /ca/ee/ca/profileSubmit?profileId=caServerCert&serial_num=5&
+                renewal=true&xml=true&requestor_name=IPA 
+
+        CS uses the existing cert to generate and return a new one.
+
+        Double-check that the cert in that request entry,
+           dn: cn=<serial#>,ou=ca,ou=requests,o=ipaca
+        """
+        requests = self.get_requests()
+
+        for request in requests:
+            if request.get('ca-name') != 'dogtag-ipa-ca-renew-agent':
+                continue
+            request_id = certmonger.get_request_id(request)
+            serial = int(certmonger.get_request_value(request_id, 'serial'))
+            template_subject = certmonger.get_request_value(request_id, 'template-subject')
+
+            dn = DN(('cn', serial),('ou', 'ca'), ('ou', 'requests'),
+                    ('o', 'ipaca'))
+
+            try:
+                entries = self.conn.get_entries(dn,
+                                                self.conn.SCOPE_SUBTREE)
+            except errors.NotFound:
+                self.failures.append('Unable to find request for serial %s' %
+                                     serial)
+            except Exception as e:
+                self.failures.append('Failed to load request for serial %s' %
+                                     serial)
+            else:
+                s = entries[0].get('extdata-req--005fsubject--005fname')
+                if s is None:
+                    continue
+                subject_der = base64.b64decode(s[0])
+                subject = der_to_subject(subject_der)
+
+                if subject != template_subject:
+                    self.failures.append('Subject %s and template subject %s '
+                                         'do not match for serial %s' %
+                                         (subject, template_subject, serial))
+                               
 
     def check_ra_cert(self):
         """Check the RA certificate subject & blob against LDAP"""
