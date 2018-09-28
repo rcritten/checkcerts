@@ -7,13 +7,17 @@ from __future__ import absolute_import
 import base64
 import datetime
 import grp
-import gssapi
 import logging
 import os
 import pwd
 import sys
 import tempfile
+import gssapi
 from six import string_types
+from ipalib import api
+from ipalib import errors
+from ipalib import x509
+from ipalib.install.kinit import kinit_keytab
 from ipalib.install import certmonger
 from ipaplatform.paths import paths
 from ipaserver.install import installutils
@@ -21,10 +25,7 @@ from ipaserver.install import certs
 from ipaserver.install import cainstance
 from ipaserver.install import dsinstance
 from ipaserver.install import httpinstance
-from ipalib import api
-from ipalib import errors
-from ipalib import x509
-from ipalib.install.kinit import kinit_keytab
+from ipaserver.plugins import ldap2
 from ipapython.certdb import unparse_trust_flags
 from ipapython.dn import DN
 from ipapython import ipautil
@@ -33,15 +34,13 @@ from ipapython.ipa_log_manager import log_mgr
 from ipapython import ipa_log_manager
 from ipapython import version
 from cryptography.hazmat.primitives.serialization import Encoding
-from ipaserver.plugins import ldap2
+from cryptography.x509.oid import ObjectIdentifier
 try:
     from ipapython.directivesetter import get_directive
 except ImportError:
     from ipaserver.install.installutils import get_directive
 from pyasn1_modules.rfc2459 import Name
 from pyasn1.codec.der.decoder import decode
-from cryptography.x509.oid import ObjectIdentifier
-
 try:
     from ipapython.dn import ATTR_NAME_BY_OID
 except ImportError:
@@ -99,9 +98,15 @@ class certcheck(object):
     Checks out certificate stuff
     """
 
-    def run(self):
+    def __init__(self):
         self.failures = []
+        self.service = None
+        self.serverid = None
+        self.ca = None
+        self.conn = None
 
+    def run(self):
+        """Execute the tests"""
         api.bootstrap(in_server=False,
                       context='cert_check',
                       confdir=paths.ETC_IPA)
@@ -263,6 +268,7 @@ class certcheck(object):
         return requests
 
     def check_ca_status(self):
+        """GET status from dogtag to see if it is running"""
         try:
             status = dogtag.ca_status(api.env.host)
             logger.debug('The CA status is: %s' % status)
@@ -270,7 +276,7 @@ class certcheck(object):
             self.failures.append('CA is not running: %s' % e)
 
     def check_tracking(self):
-
+        """Compare expected vs actual tracking configuration"""
         requests = self.get_requests()
 
         for request in requests:
@@ -608,11 +614,13 @@ class certcheck(object):
                 )
 
             if version.NUM_VERSION < 40600:
-                (
-                    paths.HTTPD_ALIAS_DIR,
-                    http.get_mod_nss_nickname(),
-                    os.path.join(paths.HTTPD_ALIAS_DIR, 'pwdfile.txt'),
-                ),
+                validate.append(
+                    (
+                        paths.HTTPD_ALIAS_DIR,
+                        http.get_mod_nss_nickname(),
+                        os.path.join(paths.HTTPD_ALIAS_DIR, 'pwdfile.txt'),
+                    ),
+                )
 
             # TODO: validate Apache PEM cert
 
@@ -739,7 +747,6 @@ class certcheck(object):
             )
 
         for db in databases:
-            files = db['files']
             for (file, owner, group, mode) in db['files']:
                 path = os.path.join(db['dirname'], file)
                 stat = os.stat(path)
