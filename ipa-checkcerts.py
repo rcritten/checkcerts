@@ -93,6 +93,17 @@ def der_to_subject(der):
     return subject
 
 
+def validate_openssl(file):
+    """Call out to openssl to verify a certificate against global chain"""
+    args = [paths.OPENSSL, "verify", file]
+
+    try:
+        result = ipautil.run(args)
+    except ipautil.CalledProcessError as e:
+        self.failures.append('Validation of %s failed: %s'
+                             % (file, e))
+
+
 class certcheck(object):
     """
     Checks out certificate stuff
@@ -613,7 +624,7 @@ class certcheck(object):
                     ),
                 )
 
-            if version.NUM_VERSION < 40600:
+            if version.NUM_VERSION < 40700:
                 validate.append(
                     (
                         paths.HTTPD_ALIAS_DIR,
@@ -621,8 +632,6 @@ class certcheck(object):
                         os.path.join(paths.HTTPD_ALIAS_DIR, 'pwdfile.txt'),
                     ),
                 )
-
-            # TODO: validate Apache PEM cert
 
             for (dbdir, nickname, pinfile) in validate:
                 args = [paths.CERTUTIL, "-V", "-u", "V", "-e"]
@@ -645,6 +654,11 @@ class certcheck(object):
         finally:
             if ca_pw_name:
                 installutils.remove_file(ca_pw_name)
+
+        if version.NUM_VERSION >= 40700:
+            validate_openssl(paths.HTTPD_CERT_FILE)
+
+        validate_openssl(paths.RA_AGENT_PEM)
 
     def check_renewal_master(self):
         """Compare is_renewal_master to local config"""
