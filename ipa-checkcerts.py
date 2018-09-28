@@ -58,6 +58,7 @@ else:
     SECDB = 'pkcs11.txt'
     logger = logging.getLogger(os.path.basename(__file__))
 
+
 def load_pem_certificate(cert):
     """Abstract load PEM certificate by IPA version"""
     if version.NUM_VERSION < 40600:
@@ -67,12 +68,14 @@ def load_pem_certificate(cert):
     else:
         return x509.load_pem_x509_certificate(bytes(cert, 'utf-8'))
 
+
 def load_der_certificate(cert):
     """Abstract load DER certificate by IPA version"""
     if version.NUM_VERSION < 40600:
         return x509.load_certificate(cert, x509.DER)
     else:
         return x509.load_der_x509_certificate(cert)
+
 
 def der_to_subject(der):
     """Convert Name() ASN.1 into a DN type"""
@@ -89,6 +92,7 @@ def der_to_subject(der):
         subject += (DN((ATTR_NAME_BY_OID[ObjectIdentifier(rdn)], value)))
 
     return subject
+
 
 class certcheck(object):
     """
@@ -188,51 +192,55 @@ class certcheck(object):
                 'cert-postsave-command': template % 'renew_ra_cert',
             },
         ]
-    
+
         ca_requests = [
             {
                 'cert-database': paths.PKI_TOMCAT_ALIAS_DIR,
                 'cert-nickname': 'auditSigningCert cert-pki-ca',
                 'ca-name': 'dogtag-ipa-ca-renew-agent',
                 'cert-presave-command': template % 'stop_pkicad',
-                'cert-postsave-command': (template %
-                     'renew_ca_cert "auditSigningCert cert-pki-ca"'),
+                'cert-postsave-command': (
+                    template %
+                    'renew_ca_cert "auditSigningCert cert-pki-ca"'),
             },
             {
                 'cert-database': paths.PKI_TOMCAT_ALIAS_DIR,
                 'cert-nickname': 'ocspSigningCert cert-pki-ca',
                 'ca-name': 'dogtag-ipa-ca-renew-agent',
                 'cert-presave-command': template % 'stop_pkicad',
-                'cert-postsave-command': (template %
-                     'renew_ca_cert "ocspSigningCert cert-pki-ca"'),
+                'cert-postsave-command': (
+                    template %
+                    'renew_ca_cert "ocspSigningCert cert-pki-ca"'),
             },
             {
                 'cert-database': paths.PKI_TOMCAT_ALIAS_DIR,
                 'cert-nickname': 'subsystemCert cert-pki-ca',
                 'ca-name': 'dogtag-ipa-ca-renew-agent',
                 'cert-presave-command': template % 'stop_pkicad',
-                'cert-postsave-command': (template %
-                     'renew_ca_cert "subsystemCert cert-pki-ca"'),
+                'cert-postsave-command': (
+                    template %
+                    'renew_ca_cert "subsystemCert cert-pki-ca"'),
             },
             {
                 'cert-database': paths.PKI_TOMCAT_ALIAS_DIR,
                 'cert-nickname': 'caSigningCert cert-pki-ca',
                 'ca-name': 'dogtag-ipa-ca-renew-agent',
                 'cert-presave-command': template % 'stop_pkicad',
-                'cert-postsave-command':
-                (template % 'renew_ca_cert "caSigningCert cert-pki-ca"'),
-                    'template-profile': None,
+                'cert-postsave-command': (
+                    template % 'renew_ca_cert "caSigningCert cert-pki-ca"'),
+                'template-profile': None,
             },
             {
                 'cert-database': paths.PKI_TOMCAT_ALIAS_DIR,
                 'cert-nickname': 'Server-Cert cert-pki-ca',
                 'ca-name': 'dogtag-ipa-ca-renew-agent',
                 'cert-presave-command': template % 'stop_pkicad',
-                'cert-postsave-command': (template %
+                'cert-postsave-command': (
+                    template %
                     'renew_ca_cert "Server-Cert cert-pki-ca"'),
             },
         ]
-    
+
         if self.ca.is_configured():
             db = certs.CertDB(api.env.realm, paths.PKI_TOMCAT_ALIAS_DIR)
             for nickname, _trust_flags in db.list_certs():
@@ -264,7 +272,7 @@ class certcheck(object):
     def check_tracking(self):
 
         requests = self.get_requests()
-    
+
         for request in requests:
             request_id = certmonger.get_request_id(request)
 
@@ -306,7 +314,7 @@ class certcheck(object):
         threshold = 7  # days
 
         requests = self.get_requests()
-    
+
         now = datetime.datetime.utcnow()
 
         for request in requests:
@@ -319,7 +327,7 @@ class certcheck(object):
             rawcert = certmonger.get_request_value(request_id, 'cert')
             cert = load_pem_certificate(str(rawcert))
             diff = cert.not_valid_after - now
-            if diff.days < 0:  #  TODO: this is false-positive generator
+            if diff.days < 0:  # TODO: this is false-positive generator
                 self.failures.append("Certificate %s is expired" % nickname)
             elif diff.days < threshold:
                 self.failures.append("Certificate %s is expiring soon"
@@ -343,9 +351,10 @@ class certcheck(object):
         db = certs.CertDB(api.env.realm, paths.PKI_TOMCAT_ALIAS_DIR)
         for nickname, _trust_flags in db.list_certs():
             val = get_directive(paths.CA_CS_CFG_PATH,
-                                blobs[nickname] , '=')
+                                blobs[nickname], '=')
             if val is None:
-                self.failures.append('Certificate %s not found in %s'
+                self.failures.append(
+                    'Certificate %s not found in %s'
                     % (blobs[nickname], paths.CA_CS_CFG_PATH))
                 continue
             cert = db.get_cert_from_db(nickname)
@@ -360,7 +369,8 @@ class certcheck(object):
 
             # TODO: Handle multi-valued certs.
             if pem.strip() != val:
-                self.failures.append('Certificate %s does not match %s'
+                self.failures.append(
+                    'Certificate %s does not match %s'
                     % (blobs[nickname], paths.CA_CS_CFG_PATH))
 
     def compare_requests(self):
@@ -371,7 +381,7 @@ class certcheck(object):
         CA dogtag-ipa-ca-renew-agent. This renews by serial number,
         sending CS a request like:
             GET /ca/ee/ca/profileSubmit?profileId=caServerCert&serial_num=5&
-                renewal=true&xml=true&requestor_name=IPA 
+                renewal=true&xml=true&requestor_name=IPA
 
         CS uses the existing cert to generate and return a new one.
 
@@ -385,9 +395,11 @@ class certcheck(object):
                 continue
             request_id = certmonger.get_request_id(request)
             serial = int(certmonger.get_request_value(request_id, 'serial'))
-            template_subject = certmonger.get_request_value(request_id, 'template-subject')
+            template_subject = certmonger.get_request_value(
+                request_id, 'template-subject'
+            )
 
-            dn = DN(('cn', serial),('ou', 'ca'), ('ou', 'requests'),
+            dn = DN(('cn', serial), ('ou', 'ca'), ('ou', 'requests'),
                     ('o', 'ipaca'))
 
             try:
@@ -410,13 +422,14 @@ class certcheck(object):
                     self.failures.append('Subject %s and template subject %s '
                                          'do not match for serial %s' %
                                          (subject, template_subject, serial))
-                               
 
     def check_ra_cert(self):
         """Check the RA certificate subject & blob against LDAP"""
 
         if not self.conn:
-            self.failures.append('Skipping RA check because no LDAP connection')
+            self.failures.append(
+                'Skipping RA check because no LDAP connection'
+            )
             return
 
         cert = x509.load_certificate_from_file(paths.RA_AGENT_PEM)
@@ -438,8 +451,8 @@ class certcheck(object):
         base_dn = DN(('o', 'ipaca'))
         try:
             entries = self.conn.get_entries(base_dn,
-                                       self.conn.SCOPE_SUBTREE,
-                                       db_filter)
+                                            self.conn.SCOPE_SUBTREE,
+                                            db_filter)
         except errors.NotFound:
             self.failures.append('RA agent certificate not found in LDAP')
             return
@@ -569,8 +582,8 @@ class certcheck(object):
                     self.failures.append("The password to the 'internal' "
                                          "token of the Dogtag certificate "
                                          "store was not found.")
-            with tempfile.NamedTemporaryFile(
-                    mode='w', delete=False) as ca_pw_file:
+            with tempfile.NamedTemporaryFile(mode='w',
+                                             delete=False) as ca_pw_file:
                 ca_pw_file.write(ca_passwd)
                 ca_pw_name = ca_pw_file.name
 
@@ -581,7 +594,7 @@ class certcheck(object):
                     ds.get_server_cert_nickname(self.serverid),
                     os.path.join(dsinstance.config_dirname(self.serverid),
                                  'pwdfile.txt'),
-    
+
                 ),
             ]
 
@@ -594,7 +607,7 @@ class certcheck(object):
                     ),
                 )
 
-            if (version.NUM_VERSION < 40600):
+            if version.NUM_VERSION < 40600:
                 (
                     paths.HTTPD_ALIAS_DIR,
                     http.get_mod_nss_nickname(),
@@ -615,11 +628,12 @@ class certcheck(object):
                     self.failures.append('Validation of %s in %s failed: %s'
                                          % (nickname, dbdir, e))
                 else:
-                    if not 'certificate is valid' in result.raw_output.decode('utf-8'):
+                    if 'certificate is valid' not in \
+                            result.raw_output.decode('utf-8'):
                         self.failures.append(
                             'Validation of %s in %s failed: '
                             '%s %s' % (nickname, dbdir,
-                            result.raw_output, result.error_log))
+                                       result.raw_output, result.error_log))
         finally:
             if ca_pw_name:
                 installutils.remove_file(ca_pw_name)
@@ -638,8 +652,8 @@ class certcheck(object):
 
         try:
             entries = self.conn.get_entries(base_dn=dn,
-                                       filter=renewal_filter,
-                                       attrs_list=['cn'])
+                                            filter=renewal_filter,
+                                            attrs_list=['cn'])
         except errors.NotFound:
             self.failures.append('No certificate renewal master configured')
         except Exception as e:
@@ -647,11 +661,13 @@ class certcheck(object):
                                  % e)
         else:
             if len(entries) == 0:
-                self.failures.append('No certificate renewal master configured')
+                self.failures.append(
+                    'No certificate renewal master configured'
+                )
             elif len(entries) == 1:
-                logger.debug("This machine is the renewal master")
+                logger.debug('This machine is the renewal master')
             elif len(entries) > 1:
-                fqdns=[]
+                fqdns = []
                 for entry in entries:
                     # Cheating because I know the DN ordering
                     fqdns.append(entry.dn[1].value)
@@ -662,7 +678,7 @@ class certcheck(object):
     def cert_api_test(self):
         """Use current credentials to try to view a certificate"""
         serialno = 1  # TODO don't hardcode it
-        
+
         try:
             api.Backend.rpcclient.connect()
             api.Command.cert_show(serialno)
@@ -674,7 +690,7 @@ class certcheck(object):
     def check_permissions(self):
 
         # TODO: see if this is something unique about my install
-        if (version.NUM_VERSION < 40700):
+        if version.NUM_VERSION < 40700:
             dirsrv_group = 'root'
         else:
             dirsrv_group = 'dirsrv'
@@ -746,13 +762,13 @@ class certcheck(object):
 
 if __name__ == '__main__':
     ipa_log_manager.standard_logging_setup(
-           None,
-           verbose=True,
-           debug=False,
-           console_format='%(message)s')
+        None,
+        verbose=True,
+        debug=False,
+        console_format='%(message)s')
 
     if not installutils.is_ipa_configured():
         logger.info("IPA is not configured")
-        sys.exit(1)   
+        sys.exit(1)
     c = certcheck()
     sys.exit(c.run())
