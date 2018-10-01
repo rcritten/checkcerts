@@ -40,7 +40,8 @@ Simple check to see if the CA is up and responding.
 ## Check tracking
 
 Compares what the tracking for the CA, HTTP, DS and KDC certificates
-should look like to what is actually being tracked.
+should look like to what is actually being tracked. Provide a warning
+for unknown certificates being tracked by certmonger.
 
 ## Check NSS trust
 
