@@ -4,6 +4,7 @@
 
 from __future__ import absolute_import
 
+import argparse
 import base64
 import datetime
 import grp
@@ -46,6 +47,23 @@ try:
     from ipapython.dn import ATTR_NAME_BY_OID
 except ImportError:
     from ipapython.dn import _ATTR_NAME_BY_OID as ATTR_NAME_BY_OID
+
+parser = argparse.ArgumentParser(
+    prog='ipa-checkcerts',
+    description='IPA certificate health checker'
+)
+
+parser.add_argument(
+    '--debug',
+    action='store_true',
+    help='Enable IPA API debugging output'
+)
+parser.add_argument(
+    '--verbose',
+    action='store_true',
+    help='Verbose mode'
+)
+
 
 if version.NUM_VERSION < 40700:
     KEYDB = 'key3.db'
@@ -94,17 +112,6 @@ def der_to_subject(der):
     return subject
 
 
-def validate_openssl(file):
-    """Call out to openssl to verify a certificate against global chain"""
-    args = [paths.OPENSSL, "verify", file]
-
-    try:
-        result = ipautil.run(args)
-    except ipautil.CalledProcessError as e:
-        self.failures.append('Validation of %s failed: %s'
-                             % (file, e))
-
-
 def is_ipa_issued_cert(api, cert):
     """
     Compatibility function since 4.5 and 4.6 can only check certs
@@ -141,16 +148,26 @@ class certcheck(object):
         self.http = None
         self.conn = None
 
+    def failure(self, msg):
+        self.failures.append(msg)
+        logger.debug('FAIL: %s', msg)
+
+    def warning(self, msg):
+        self.warnings.append(msg)
+        logger.debug('WARN: %s', msg)
+
+    def validate_openssl(self, file):
+        """Call out to openssl to verify a certificate against global chain"""
+        args = [paths.OPENSSL, "verify", file]
+
+        try:
+            result = ipautil.run(args)
+        except ipautil.CalledProcessError as e:
+            self.failure('Validation of %s failed: %s'
+                         % (file, e))
+
     def run(self):
         """Execute the tests"""
-        api.bootstrap(in_server=True,
-                      context='cert_check',
-                      confdir=paths.ETC_IPA)
-        try:
-            api.finalize()
-        except errors.CCacheError:
-            logger.error("admin level Kerberos credentials are required")
-            return 1
 
         api.Backend.ldap2.connect()
 
@@ -364,7 +381,7 @@ class certcheck(object):
             status = dogtag.ca_status(api.env.host)
             logger.debug('The CA status is: %s' % status)
         except Exception as e:
-            self.failures.append('CA is not running: %s' % e)
+            self.failure('CA is not running: %s' % e)
 
     def check_tracking(self):
         """Compare expected vs actual tracking configuration"""
@@ -387,14 +404,14 @@ class certcheck(object):
                 if request_id is not None:
                     ids.remove(request_id)
             except ValueError as e:
-                self.failures.append('Failure trying to remove % from '
-                                     'list: %s' % (request_id, e))
+                self.failure('Failure trying to remove % from '
+                             'list: %s' % (request_id, e))
 
             if request_id is None:
-                self.failures.append('Missing tracking for %s' % request)
+                self.failure('Missing tracking for %s' % request)
 
         if ids:
-            self.warnings.append('Unknown certmonger ids: %s' % ','.join(ids))
+            self.warning('Unknown certmonger ids: %s' % ','.join(ids))
 
     def check_trust(self):
         """Check the NSS trust flags"""
@@ -419,7 +436,7 @@ class certcheck(object):
             else:
                 expected = expected_trust[nickname]
             if flags != expected:
-                self.failures.append(
+                self.failure(
                     'Incorrect NSS trust for %s. Got %s expected %s'
                     % (nickname, flags, expected))
 
@@ -443,13 +460,13 @@ class certcheck(object):
             cert = load_pem_certificate(str(rawcert))
             diff = cert.not_valid_after - now
             if diff.days < 0:  # TODO: this is false-positive generator
-                self.failures.append("Certificate %s is expired" % nickname)
+                self.failure("Certificate %s is expired" % nickname)
             elif diff.days < threshold:
-                self.failures.append("Certificate %s is expiring soon"
-                                     % nickname)
+                self.failure("Certificate %s is expiring soon"
+                             % nickname)
             elif cert.not_valid_before > now:
-                self.failures.append("Certificate %s is not valid yet"
-                                     % nickname)
+                self.failure("Certificate %s is not valid yet"
+                             % nickname)
 
     def check_cs_cfg(self):
         """Compare cert blob in NSS database to that stored in CS.cfg"""
@@ -468,7 +485,7 @@ class certcheck(object):
             val = get_directive(paths.CA_CS_CFG_PATH,
                                 blobs[nickname], '=')
             if val is None:
-                self.failures.append(
+                self.failure(
                     'Certificate %s not found in %s'
                     % (blobs[nickname], paths.CA_CS_CFG_PATH))
                 continue
@@ -484,7 +501,7 @@ class certcheck(object):
 
             # TODO: Handle multi-valued certs.
             if pem.strip() != val:
-                self.failures.append(
+                self.failure(
                     'Certificate %s does not match %s'
                     % (blobs[nickname], paths.CA_CS_CFG_PATH))
 
@@ -509,12 +526,10 @@ class certcheck(object):
             if request.get('ca-name') != 'dogtag-ipa-ca-renew-agent':
                 continue
             request_id = certmonger.get_request_id(request)
-            # the serial is stored as hex by certmonger and dogtag stores
-            # it as decimal, convert it.
-            serial = int(certmonger.get_request_value(request_id, 'serial'), 16)
+            serial = int(certmonger.get_request_value(request_id, 'serial'),
+                         16)
             template_subject = DN(certmonger.get_request_value(
-                request_id, 'template-subject')
-            )
+                request_id, 'template-subject'))
 
             dn = DN(('cn', serial), ('ou', 'ca'), ('ou', 'requests'),
                     ('o', 'ipaca'))
@@ -523,34 +538,33 @@ class certcheck(object):
                 entries = self.conn.get_entries(dn,
                                                 self.conn.SCOPE_SUBTREE)
             except errors.NotFound:
-                self.failures.append('Unable to find request for serial %s' %
-                                     serial)
+                self.failure('Unable to find request for serial %s' %
+                             serial)
             except Exception as e:
-                self.failures.append('Failed to load request for serial %s' %
-                                     serial)
+                self.failure('Failed to load request for serial %s' %
+                             serial)
             else:
                 s = entries[0].get('extdata-req--005fsubject--005fname')
                 if s is None:
                     continue
                 subject_der = base64.b64decode(s[0])
                 subject = DN(der_to_subject(subject_der))
+                subject = DN(der_to_subject(subject_der))
 
-                # x500_text() reverses the order of the RDNs. Check in
-                # both directions since OpenSSL and NSS order the
-                # subject differently.
+                logger.debug('CS template %s, CM subject %s, serial %s',
+                             subject, template_subject, serial)
+
                 if ((subject != template_subject) and
                         (subject != template_subject.x500_text())):
-                    self.failures.append('Subject %s and template subject %s '
-                                         'do not match for serial %s' %
-                                         (subject, template_subject, serial))
+                    self.failure('Subject %s and template subject %s '
+                                 'do not match for serial %s' %
+                                 (subject, template_subject, serial))
 
     def check_ra_cert(self):
         """Check the RA certificate subject & blob against LDAP"""
 
         if not self.conn:
-            self.failures.append(
-                'Skipping RA check because no LDAP connection'
-            )
+            self.failure('Skipping RA check because no LDAP connection')
             return
 
         cert = x509.load_certificate_from_file(paths.RA_AGENT_PEM)
@@ -559,6 +573,8 @@ class certcheck(object):
         subject = DN(cert.subject)
         issuer = DN(cert.issuer)
         description = '2;%d;%s;%s' % (serial_number, issuer, subject)
+
+        logger.debug('RA agent description should be %s', description)
 
         db_filter = ldap2.ldap2.combine_filters(
             [
@@ -575,21 +591,21 @@ class certcheck(object):
                                             self.conn.SCOPE_SUBTREE,
                                             db_filter)
         except errors.NotFound:
-            self.failures.append('RA agent certificate not found in LDAP')
+            self.failure('RA agent certificate not found in LDAP')
             return
         except Exception as e:
-            self.failures.append('RA agent check failed %s' % e)
+            self.failure('RA agent check failed %s' % e)
             return
         else:
             if len(entries) != 1:
-                self.failures.append('Too many RA agent entries found')
+                self.failure('Too many RA agent entries found')
             entry = entries[0]
             ra_desc = entry.get('description')[0]
             ra_certs = entry.get('usercertificate')
             if ra_desc != description:
-                self.failures.append('RA agent description does not match '
-                                     '%s in LDAP and %s expected' %
-                                     (ra_desc, description))
+                self.failure('RA agent description does not match '
+                             '%s in LDAP and %s expected' %
+                             (ra_desc, description))
             found = False
             for check in ra_certs:
                 if isinstance(check, str):
@@ -598,12 +614,12 @@ class certcheck(object):
                     found = True
                     break
             if not found:
-                self.failures.append('RA agent certificate not found in LDAP')
+                self.failure('RA agent certificate not found in LDAP')
 
     def check_ipa_to_cs_authorities(self):
         """Check that the authorities in IPA are in CS"""
         if not self.conn:
-            self.failures.append(
+            self.failure(
                 'Skipping authorities check because no LDAP connection'
             )
             return
@@ -618,26 +634,27 @@ class certcheck(object):
                                             self.conn.SCOPE_SUBTREE,
                                             db_filter)
         except errors.NotFound:
-            self.failures.append('')
+            self.failure('CA authorities not found')
             return
         except Exception as e:
-            self.failures.append('Search for authorities %s' % e)
+            self.failure('Search for authorities failed %s' % e)
             return
         else:
             for entry in entries:
                 caid = entry.get('ipacaid')[0]
+                logger.debug('Looking for IPA authority %s in CS', caid)
                 try:
                     e = self.conn.get_entries(ca_base_dn,
                                               self.conn.SCOPE_SUBTREE,
                                               'cn=%s' % caid)
                 except Exception as e:
-                    self.failures.append('Error looking up IPA CA entry in '
-                                         'CA %s: %s', caid, e)
+                    self.failure('Error looking up IPA CA entry in '
+                                 'CA %s: %s', caid, e)
 
     def check_cs_to_ipa_authorities(self):
         """Check that the authorities in CS are in IPA"""
         if not self.conn:
-            self.failures.append(
+            self.failure(
                 'Skipping authorities check because no LDAP connection'
             )
             return
@@ -652,21 +669,22 @@ class certcheck(object):
                                             self.conn.SCOPE_SUBTREE,
                                             db_filter)
         except errors.NotFound:
-            self.failures.append('')
+            self.failure('CA authorities not found in CS')
             return
         except Exception as e:
-            self.failures.append('Search for authorities failed %s' % e)
+            self.failure('Search for authorities failed %s' % e)
             return
         else:
             for entry in entries:
                 caid = entry.get('cn')[0]
+                logger.debug('Looking for CS authority %s in IPA', caid)
                 try:
                     e = self.conn.get_entries(base_dn,
                                               self.conn.SCOPE_SUBTREE,
                                               'ipacaid=%s' % caid)
                 except Exception as e:
-                    self.failures.append('Error looking up CA entry in '
-                                         'IPA %s: %s' % (caid, e))
+                    self.failure('Error looking up CA entry in '
+                                 'IPA %s: %s' % (caid, e))
 
     def check_hostkeytab(self):
         """Ensure the host keytab can get a TGT"""
@@ -678,7 +696,7 @@ class certcheck(object):
                 host_princ = str('host/%s@%s' % (api.env.host, api.env.realm))
                 kinit_keytab(host_princ, paths.KRB5_KEYTAB, ccache_name)
             except gssapi.exceptions.GSSError as e:
-                self.failures.append('Failed to obtain host TGT: %s' % e)
+                self.failure('Failed to obtain host TGT: %s' % e)
         finally:
             installutils.remove_file(ccache_name)
             os.rmdir(ccache_dir)
@@ -697,9 +715,9 @@ class certcheck(object):
                         ca_passwd = pin.strip()
                         break
                 else:
-                    self.failures.append("The password to the 'internal' "
-                                         "token of the Dogtag certificate "
-                                         "store was not found.")
+                    self.failure("The password to the 'internal' "
+                                 "token of the Dogtag certificate "
+                                 "store was not found.")
             with tempfile.NamedTemporaryFile(mode='w',
                                              delete=False) as ca_pw_file:
                 ca_pw_file.write(ca_passwd)
@@ -743,12 +761,12 @@ class certcheck(object):
                 try:
                     result = ipautil.run(args)
                 except ipautil.CalledProcessError as e:
-                    self.failures.append('Validation of %s in %s failed: %s'
-                                         % (nickname, dbdir, e))
+                    self.failure('Validation of %s in %s failed: %s'
+                                 % (nickname, dbdir, e))
                 else:
                     if 'certificate is valid' not in \
                             result.raw_output.decode('utf-8'):
-                        self.failures.append(
+                        self.failure(
                             'Validation of %s in %s failed: '
                             '%s %s' % (nickname, dbdir,
                                        result.raw_output, result.error_log))
@@ -757,14 +775,14 @@ class certcheck(object):
                 installutils.remove_file(ca_pw_name)
 
         if version.NUM_VERSION >= 40700:
-            validate_openssl(paths.HTTPD_CERT_FILE)
+            self.validate_openssl(paths.HTTPD_CERT_FILE)
 
-        validate_openssl(paths.RA_AGENT_PEM)
+        self.validate_openssl(paths.RA_AGENT_PEM)
 
     def check_renewal_master(self):
         """Compare is_renewal_master to local config"""
         if not self.conn:
-            self.failures.append(
+            self.failure(
                 'Skipping renewal master check because no LDAP connection'
             )
             return
@@ -778,15 +796,13 @@ class certcheck(object):
                                             filter=renewal_filter,
                                             attrs_list=['cn'])
         except errors.NotFound:
-            self.failures.append('No certificate renewal master configured')
+            self.failure('No certificate renewal master configured')
         except Exception as e:
-            self.failures.append('Failed to get certificate renewal master %s'
-                                 % e)
+            self.failure('Failed to get certificate renewal master %s'
+                         % e)
         else:
             if len(entries) == 0:
-                self.failures.append(
-                    'No certificate renewal master configured'
-                )
+                self.failure('No certificate renewal master configured')
             elif len(entries) == 1:
                 logger.debug('This machine is the renewal master')
             elif len(entries) > 1:
@@ -794,9 +810,9 @@ class certcheck(object):
                 for entry in entries:
                     # Cheating because I know the DN ordering
                     fqdns.append(entry.dn[1].value)
-                    self.failures.append('Multiple certificate renewal '
-                                         'masters are configured: %s' %
-                                         ','.join(fqdns))
+                    self.failure('Multiple certificate renewal '
+                                 'masters are configured: %s' %
+                                 ','.join(fqdns))
 
     def cert_api_test(self):
         """Use current credentials to try to view a certificate"""
@@ -805,7 +821,7 @@ class certcheck(object):
         try:
             api.Command.cert_show(serialno)
         except Exception as e:
-            self.failures.append('cert-show of %s failed: %s' % (serialno, e))
+            self.failure('cert-show of %s failed: %s' % (serialno, e))
 
     def check_permissions(self):
 
@@ -863,28 +879,46 @@ class certcheck(object):
                 path = os.path.join(db['dirname'], file)
                 stat = os.stat(path)
                 fmode = str(oct(stat.st_mode)[-4:])
+                logger.debug(path)
                 if mode != fmode:
-                    self.failures.append('Permissions of %s are %s and should '
-                                         'be %s' % (path, fmode, mode))
+                    self.failure('Permissions of %s are %s and should '
+                                 'be %s' % (path, fmode, mode))
                 fowner = pwd.getpwnam(owner)
                 if fowner.pw_uid != stat.st_uid:
                     actual = pwd.getpwuid(stat.st_uid)
-                    self.failures.append('Ownership of %s is %s and should '
-                                         'be %s' %
-                                         (path, actual.pw_name, owner))
+                    self.failure('Ownership of %s is %s and should '
+                                 'be %s' %
+                                 (path, actual.pw_name, owner))
                 fgroup = grp.getgrnam(group)
                 if fgroup.gr_gid != stat.st_gid:
                     actual = grp.getgrgid(stat.st_gid)
-                    self.failures.append('Group of %s is %s and should '
-                                         'be %s' %
-                                         (path, actual.gr_name, group))
+                    self.failure('Group of %s is %s and should '
+                                 'be %s' %
+                                 (path, actual.gr_name, group))
 
 if __name__ == '__main__':
+    args = parser.parse_args()
+
+    api.bootstrap(in_server=True,
+                  debug=args.debug,
+                  context='cert_check',
+                  confdir=paths.ETC_IPA)
+    try:
+        api.finalize()
+    except errors.CCacheError:
+        logger.error("admin level Kerberos credentials are required")
+        sys.exit(1)
+
+    if args.verbose:
+        format = '%(levelname)s: %(message)s'
+    else:
+        format = '%(message)s'
     ipa_log_manager.standard_logging_setup(
         None,
         verbose=True,
-        debug=False,
-        console_format='%(message)s')
+        debug=args.verbose,
+        console_format=format
+    )
 
     if not installutils.is_ipa_configured():
         logger.info("IPA is not configured")
