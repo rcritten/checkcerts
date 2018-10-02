@@ -509,9 +509,11 @@ class certcheck(object):
             if request.get('ca-name') != 'dogtag-ipa-ca-renew-agent':
                 continue
             request_id = certmonger.get_request_id(request)
-            serial = int(certmonger.get_request_value(request_id, 'serial'))
-            template_subject = certmonger.get_request_value(
-                request_id, 'template-subject'
+            # the serial is stored as hex by certmonger and dogtag stores
+            # it as decimal, convert it.
+            serial = int(certmonger.get_request_value(request_id, 'serial'), 16)
+            template_subject = DN(certmonger.get_request_value(
+                request_id, 'template-subject')
             )
 
             dn = DN(('cn', serial), ('ou', 'ca'), ('ou', 'requests'),
@@ -531,9 +533,13 @@ class certcheck(object):
                 if s is None:
                     continue
                 subject_der = base64.b64decode(s[0])
-                subject = der_to_subject(subject_der)
+                subject = DN(der_to_subject(subject_der))
 
-                if subject != template_subject:
+                # x500_text() reverses the order of the RDNs. Check in
+                # both directions since OpenSSL and NSS order the
+                # subject differently.
+                if ((subject != template_subject) and
+                        (subject != template_subject.x500_text())):
                     self.failures.append('Subject %s and template subject %s '
                                          'do not match for serial %s' %
                                          (subject, template_subject, serial))
