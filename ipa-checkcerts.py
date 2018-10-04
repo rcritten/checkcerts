@@ -920,6 +920,8 @@ if __name__ == '__main__':
         console_format=format
     )
 
+    logger.info('IPA version %s' % version.VENDOR_VERSION)
+
     if not installutils.is_ipa_configured():
         logger.info("IPA is not configured")
         sys.exit(1)
