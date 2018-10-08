@@ -370,6 +370,8 @@ class certcheck(object):
                     'cert-file': paths.KDC_CERT,
                     'key-file': paths.KDC_KEY,
                     'ca-name': 'IPA',
+                    'cert-postsave-command':
+                        '%s %s' % (template % 'renew_kdc_cert'),
                 }
             )
 
