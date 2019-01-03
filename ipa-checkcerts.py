@@ -245,15 +245,18 @@ class certcheck(object):
 
         template = paths.CERTMONGER_COMMAND_TEMPLATE
 
-        requests = [
-            {
-                'cert-file': paths.RA_AGENT_PEM,
-                'key-file': paths.RA_AGENT_KEY,
-                'ca-name': 'dogtag-ipa-ca-renew-agent',
-                'cert-presave-command': template % 'renew_ra_cert_pre',
-                'cert-postsave-command': template % 'renew_ra_cert',
-            },
-        ]
+        if self.ca.is_configured():
+            requests = [
+                {
+                    'cert-file': paths.RA_AGENT_PEM,
+                    'key-file': paths.RA_AGENT_KEY,
+                    'ca-name': 'dogtag-ipa-ca-renew-agent',
+                    'cert-presave-command': template % 'renew_ra_cert_pre',
+                    'cert-postsave-command': template % 'renew_ra_cert',
+                },
+            ]
+        else:
+            requests = []
 
         ca_requests = [
             {
@@ -379,6 +382,9 @@ class certcheck(object):
 
     def check_ca_status(self):
         """GET status from dogtag to see if it is running"""
+        if not self.ca.is_configured():
+            logger.debug("No CA configured, skipping trust check")
+            return
         try:
             status = dogtag.ca_status(api.env.host)
             logger.debug('The CA status is: %s' % status)
@@ -436,7 +442,11 @@ class certcheck(object):
             if nickname.startswith('caSigningCert cert-pki-ca'):
                 expected = 'CTu,Cu,Cu'
             else:
-                expected = expected_trust[nickname]
+                try:
+                    expected = expected_trust[nickname]
+                except KeyError:
+                    print("%s not found, assuming 3rd party" % nickname)
+                    continue
             if flags != expected:
                 self.failure(
                     'Incorrect NSS trust for %s. Got %s expected %s'
@@ -484,8 +494,12 @@ class certcheck(object):
 
         db = certs.CertDB(api.env.realm, paths.PKI_TOMCAT_ALIAS_DIR)
         for nickname, _trust_flags in db.list_certs():
-            val = get_directive(paths.CA_CS_CFG_PATH,
-                                blobs[nickname], '=')
+            try:
+                val = get_directive(paths.CA_CS_CFG_PATH,
+                                    blobs[nickname], '=')
+            except KeyError:
+                print("%s not found, assuming 3rd party" % nickname)
+                continue
             if val is None:
                 self.failure(
                     'Certificate %s not found in %s'
@@ -522,6 +536,10 @@ class certcheck(object):
         Double-check that the cert in that request entry,
            dn: cn=<serial#>,ou=ca,ou=requests,o=ipaca
         """
+        if not self.ca.is_configured():
+            self.failure('Skipping request compare because CA not installed')
+            return
+
         requests = self.get_requests()
 
         for request in requests:
@@ -564,6 +582,9 @@ class certcheck(object):
 
     def check_ra_cert(self):
         """Check the RA certificate subject & blob against LDAP"""
+        if not self.ca.is_configured():
+            self.failure('Skipping RA check because CA not installed')
+            return
 
         if not self.conn:
             self.failure('Skipping RA check because no LDAP connection')
@@ -779,7 +800,8 @@ class certcheck(object):
         if version.NUM_VERSION >= 40700:
             self.validate_openssl(paths.HTTPD_CERT_FILE)
 
-        self.validate_openssl(paths.RA_AGENT_PEM)
+        if self.ca.is_configured():
+            self.validate_openssl(paths.RA_AGENT_PEM)
 
     def check_renewal_master(self):
         """Compare is_renewal_master to local config"""
@@ -842,14 +864,17 @@ class certcheck(object):
                     (SECDB, 'dirsrv', dirsrv_group, '0640'),
                 ]
             },
-            {
-                'dirname': paths.VAR_LIB_IPA,
-                'files': [
-                    ('ra-agent.key', 'root', 'ipaapi', '0440'),
-                    ('ra-agent.pem', 'root', 'ipaapi', '0440'),
-                ]
-            },
         ]
+        if self.ca.is_configured():
+            databases.append(
+                {
+                    'dirname': paths.VAR_LIB_IPA,
+                    'files': [
+                        ('ra-agent.key', 'root', 'ipaapi', '0440'),
+                        ('ra-agent.pem', 'root', 'ipaapi', '0440'),
+                    ]
+                },
+            )
 
         if self.ca.is_configured():
             databases.append(
